@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import {
   LineChart,
   Line,
@@ -12,13 +12,17 @@ import "./index.css";
 import { ethers } from "ethers";
 import BalanceDisplay from "./components/BalanceDisplay";
 import Web3 from "web3";
+import ExplorerHeader from "./components/ExplorerHeader";
 
 const BlockchainExplorer = () => {
   const formatAddress = (address) => {
     if (!address || address === "N/A") return "N/A";
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
+  const [isLoadingTransactions, setIsLoadingTransactions] = useState(false);
+  const [allTransactions, setAllTransactions] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [totalPages, setTotalPages] = useState(1);
   const [incomingTransactions, setIncomingTransactions] = useState([]);
   const [outgoingTransactions, setOutgoingTransactions] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
@@ -28,7 +32,7 @@ const BlockchainExplorer = () => {
   const [account, setAccount] = useState("");
   const [isWalletConnected, setIsWalletConnected] = useState(false);
   const [connectedAddress, setConnectedAddress] = useState("");
-  const transactionsPerPage = 20;
+  const transactionsPerPage = 15;
   const [balance, setBalance] = useState("");
   const [sortConfig, setSortConfig] = useState({
     key: null,
@@ -44,27 +48,28 @@ const BlockchainExplorer = () => {
     if (!id) return "";
     return `${id.slice(0, 8)}...${id.slice(-8)}`;
   };
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setIsLoading(true);
+    setIsLoadingTransactions(true);
     try {
-      const txResponse = await fetch(
-        "https://testnet-api.onefinity.network/transactions?limit=20&page=1",
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      const txData = await txResponse.json();
-      console.log("Données de transactions:", txData);
+      let allTxs = [];
+      let page = 1;
+      const maxPages = 50; // Limit to 100 pages
 
-      console.log("API response:", txData);
+      while (page <= maxPages) {
+        const txResponse = await fetch(
+          `https://testnet-api.onefinity.network/transactions?limit=100&page=${page}`,
+          {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        const txData = await txResponse.json();
 
-      if (Array.isArray(txData)) {
-        console.log("Données de transactions brutes:", txData);
-        setTransactions(
-          txData.map((tx) => ({
+        if (Array.isArray(txData) && txData.length > 0) {
+          const newTransactions = txData.map((tx) => ({
             id: tx.txHash || "Inconnu",
             from: tx.sender || "Inconnu",
             to: tx.receiver || "Inconnu",
@@ -74,12 +79,27 @@ const BlockchainExplorer = () => {
               : "Inconnu",
             status: tx.status || "En attente",
             gas: tx.gasUsed || 0,
-          }))
-        );
-      } else {
-        console.error("La réponse de l'API n'est pas un tableau comme attendu");
-        setTransactions([]);
+            fromShard: tx.fromShard || 0,
+            toShard: tx.toShard || 0,
+          }));
+          allTxs = [...allTxs, ...newTransactions];
+          page++;
+        } else {
+          break; // No more transactions, exit the loop
+        }
       }
+
+      setAllTransactions((prevTxs) => {
+        const uniqueTxs = [
+          ...new Map([...allTxs, ...prevTxs].map((tx) => [tx.id, tx])).values(),
+        ];
+        return uniqueTxs.sort(
+          (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+        );
+      });
+      setTotalPages(Math.ceil(allTxs.length / transactionsPerPage));
+      setTransactions(allTxs.slice(0, transactionsPerPage));
+
       // Fetch network stats
       const statsResponse = await fetch(
         "https://testnet-api.onefinity.network/stats",
@@ -91,16 +111,12 @@ const BlockchainExplorer = () => {
         }
       );
       const statsData = await statsResponse.json();
-      console.log("Données de statistiques:", statsData);
-
-      console.log("Données de statistiques brutes:", statsData);
       const stats = {
         totalTransactions: statsData.transactions || 0,
         totalAccounts: statsData.accounts || 0,
         totalBlocks: statsData.blocks || 0,
-        currentEpoch: statsData.epoch || 0, // Notez que 'epoch' n'est pas présent dans les données, nous le laissons à 0 pour l'instant
+        currentEpoch: statsData.epoch || 0,
       };
-      console.log("Statistiques formatées:", stats);
       setNetworkStats(stats);
 
       // Fetch incoming and outgoing transactions if wallet is connected
@@ -133,14 +149,15 @@ const BlockchainExplorer = () => {
       console.error("Erreur lors de la récupération des données:", error);
     } finally {
       setIsLoading(false);
+      setIsLoadingTransactions(false);
     }
-  };
+  }, [transactionsPerPage, isWalletConnected, connectedAddress]);
 
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
-  }, [isWalletConnected, connectedAddress]);
+  }, [fetchData]);
 
   useEffect(() => {
     const script = document.createElement("script");
@@ -207,60 +224,25 @@ const BlockchainExplorer = () => {
 
   const indexOfLastTransaction = currentPage * transactionsPerPage;
   const indexOfFirstTransaction = indexOfLastTransaction - transactionsPerPage;
-  const currentTransactions = filteredTransactions.slice(
-    indexOfFirstTransaction,
-    indexOfLastTransaction
-  );
+  const currentTransactions = transactions;
 
-  const paginate = async (pageNumber) => {
-    setCurrentPage(pageNumber);
-    setIsLoading(true);
-    try {
-      const txResponse = await fetch(
-        `https://testnet-api.onefinity.network/transactions?limit=20&page=${pageNumber}`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
+  const paginate = useCallback(
+    (pageNumber) => {
+      setCurrentPage(pageNumber);
+      const indexOfLastTransaction = pageNumber * transactionsPerPage;
+      const indexOfFirstTransaction =
+        indexOfLastTransaction - transactionsPerPage;
+      setTransactions(
+        allTransactions.slice(indexOfFirstTransaction, indexOfLastTransaction)
       );
-      const txData = await txResponse.json();
-
-      if (Array.isArray(txData)) {
-        // Ajoutez cette fonction utilitaire en dehors du composant principal
-        const generateAccountLink = (address) => {
-          return `https://testnet-explorer.onefinity.network/accounts/${address}`;
-        };
-
-        // Dans la fonction fetchData, modifiez le bloc setTransactions comme suit :
-        setTransactions(
-          txData.slice(0, 50).map((tx) => ({
-            id: tx.txHash || "Inconnu",
-            from: tx.sender || "Inconnu",
-            fromLink: tx.sender ? generateAccountLink(tx.sender) : null,
-            to: tx.receiver || "Inconnu",
-            toLink: tx.receiver ? generateAccountLink(tx.receiver) : null,
-            amount: tx.value
-              ? (parseFloat(tx.value) / 1e18).toFixed(2)
-              : "0.00",
-            timestamp: tx.timestamp
-              ? new Date(tx.timestamp * 1000).toLocaleString()
-              : "Inconnu",
-            status: tx.status || "En attente",
-            gas: tx.gasUsed || 0,
-          }))
-        );
-      } else {
-        console.error("La réponse de l'API n'est pas un tableau comme attendu");
-        setTransactions([]);
-      }
-    } catch (error) {
-      console.error("Error fetching transactions:", error);
-    } finally {
-      setIsLoading(false);
+    },
+    [allTransactions, transactionsPerPage]
+  );
+  useEffect(() => {
+    if (allTransactions.length > 0) {
+      paginate(currentPage);
     }
-  };
+  }, [allTransactions, currentPage, paginate]);
 
   const connectWallet = async (walletType) => {
     if (walletType === "MetaMask" && window.ethereum) {
@@ -292,8 +274,14 @@ const BlockchainExplorer = () => {
       );
       const balanceData = await balanceResponse.json();
       console.log("Balance data:", balanceData);
-      if (balanceData.data && balanceData.data.balance) {
-        const formattedBalance = ethers.formatEther(balanceData.data.balance);
+      if (
+        balanceData.data &&
+        balanceData.data.account &&
+        balanceData.data.account.balance
+      ) {
+        const formattedBalance = ethers.formatEther(
+          balanceData.data.account.balance
+        );
         console.log("Formatted balance:", formattedBalance);
         setBalance(formattedBalance);
       } else {
@@ -303,27 +291,50 @@ const BlockchainExplorer = () => {
 
       // Fetch incoming transactions
       console.log("Fetching incoming transactions...");
-      const incomingTxResponse = await fetch(
-        `https://testnet-api.onefinity.network/address/${address}/transactions?type=incoming`
-      );
-      const incomingTxData = await incomingTxResponse.json();
-      console.log("Incoming transactions data:", incomingTxData);
-      setIncomingTransactions(incomingTxData.data || []);
+      try {
+        const incomingTxResponse = await fetch(
+          `https://testnet-api.onefinity.network/address/${address}/transactions?type=incoming`
+        );
+        const incomingTxData = await incomingTxResponse.json();
+        console.log("Incoming transactions data:", incomingTxData);
+        if (incomingTxData.data) {
+          setIncomingTransactions(incomingTxData.data);
+        } else {
+          console.error(
+            "Error fetching incoming transactions:",
+            incomingTxData.error
+          );
+          setIncomingTransactions([]);
+        }
+      } catch (error) {
+        console.error("Error fetching incoming transactions:", error);
+        setIncomingTransactions([]);
+      }
 
       // Fetch outgoing transactions
       console.log("Fetching outgoing transactions...");
-      const outgoingTxResponse = await fetch(
-        `https://testnet-api.onefinity.network/address/${address}/transactions?type=outgoing`
-      );
-      const outgoingTxData = await outgoingTxResponse.json();
-      console.log("Outgoing transactions data:", outgoingTxData);
-      setOutgoingTransactions(outgoingTxData.data || []);
+      try {
+        const outgoingTxResponse = await fetch(
+          `https://testnet-api.onefinity.network/address/${address}/transactions?type=outgoing`
+        );
+        const outgoingTxData = await outgoingTxResponse.json();
+        console.log("Outgoing transactions data:", outgoingTxData);
+        if (outgoingTxData.data) {
+          setOutgoingTransactions(outgoingTxData.data);
+        } else {
+          console.error(
+            "Error fetching outgoing transactions:",
+            outgoingTxData.error
+          );
+          setOutgoingTransactions([]);
+        }
+      } catch (error) {
+        console.error("Error fetching outgoing transactions:", error);
+        setOutgoingTransactions([]);
+      }
     } catch (error) {
-      console.error(
-        "Erreur lors de la récupération du solde et des transactions:",
-        error
-      );
-      setBalance("0");
+      console.error("Error fetching balance and transactions:", error);
+      setBalance("Error");
       setIncomingTransactions([]);
       setOutgoingTransactions([]);
     }
@@ -348,7 +359,7 @@ const BlockchainExplorer = () => {
       <div className="max-w-7xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden">
         <div className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white p-6">
           <h1 className="text-4xl font-bold text-center">
-            OneFinity Blockchain Explorer
+            <ExplorerHeader />
           </h1>
         </div>
 
@@ -356,7 +367,7 @@ const BlockchainExplorer = () => {
           <div className="flex justify-end mb-6 space-x-4">
             <button
               onClick={() => connectWallet("MetaMask")}
-              className="bg-orange-500 text-white px-4 py-2 rounded-md hover:bg-orange-600 transition duration-300"
+              className="bg-gradient-to-r from-purple-500 to-indigo-500 text-white px-6 py-2 rounded-full hover:from-purple-600 hover:to-indigo-600 transition duration-300 font-semibold"
               disabled={isWalletConnected}
             >
               {isWalletConnected ? "Connected" : "Connect MetaMask"}
@@ -452,16 +463,24 @@ const BlockchainExplorer = () => {
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-8">
-            {Object.entries(networkStats).map(([key, value]) => (
+            {[
+              {
+                key: "Total Transactions",
+                value: networkStats.totalTransactions,
+              },
+              { key: "Total Accounts", value: networkStats.totalAccounts },
+              { key: "Total Blocks", value: networkStats.totalBlocks },
+              { key: "Current Epoch", value: networkStats.currentEpoch },
+            ].map(({ key, value }) => (
               <div
                 key={key}
-                className="bg-gradient-to-br from-purple-100 to-indigo-100 p-4 rounded-lg shadow-md text-center transform hover:scale-105 transition duration-300"
+                className="bg-gradient-to-br from-purple-100 to-indigo-100 p-6 rounded-xl shadow-md text-center transform hover:scale-105 transition duration-300"
               >
                 <h2 className="text-lg font-semibold text-purple-700 mb-2">
-                  {key.replace(/([A-Z])/g, " $1").trim()}
+                  {key}
                 </h2>
                 <p className="text-3xl font-bold text-purple-900">
-                  {value.toLocaleString()}
+                  {value.toLocaleString("en-US")}
                 </p>
               </div>
             ))}
@@ -471,13 +490,13 @@ const BlockchainExplorer = () => {
             <h2 className="text-2xl font-bold mb-4 text-purple-800">
               Recent Transactions
             </h2>
-            {isLoading ? (
+            {isLoadingTransactions ? (
               <div className="flex justify-center items-center h-64">
                 <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-purple-900"></div>
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full bg-white rounded-lg overflow-hidden">
+                <table className="w-full bg-white rounded-lg overflow-hidden shadow-lg">
                   <thead className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white">
                     <tr>
                       <th
@@ -492,6 +511,7 @@ const BlockchainExplorer = () => {
                       >
                         De
                       </th>
+                      <th className="p-3 text-left">Shard</th>
                       <th
                         className="p-3 text-left cursor-pointer"
                         onClick={() => handleSort("to")}
@@ -555,6 +575,17 @@ const BlockchainExplorer = () => {
                           </a>
                         </td>
                         <td className="p-3">
+                          {tx.fromShard !== tx.toShard ? (
+                            <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded">
+                              Shard {tx.fromShard} → {tx.toShard}
+                            </span>
+                          ) : (
+                            <span className="bg-green-100 text-green-800 px-2 py-1 rounded">
+                              Shard {tx.fromShard}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3">
                           <a
                             href={`https://testnet-explorer.onefinity.network/address/${tx.to}`}
                             className="text-purple-600 hover:text-purple-800"
@@ -580,49 +611,93 @@ const BlockchainExplorer = () => {
             )}
           </div>
 
-          <div className="flex justify-center mt-4">
+          <div className="flex justify-center mt-4 flex-wrap">
             <button
               onClick={() => paginate(currentPage - 1)}
               disabled={currentPage === 1}
-              className="mx-1 px-3 py-1 rounded bg-purple-100 text-purple-600 disabled:opacity-50"
+              className="mx-1 my-1 px-3 py-1 rounded bg-purple-100 text-purple-600 disabled:opacity-50"
             >
               Previous
             </button>
-            {Array.from(
-              {
-                length: Math.min(
-                  5,
-                  networkStats.totalTransactions / transactionsPerPage
-                ),
-              },
-              (_, i) => {
-                const pageNumber = currentPage - 2 + i;
-                return pageNumber > 0 &&
-                  pageNumber <=
-                    Math.ceil(
-                      networkStats.totalTransactions / transactionsPerPage
-                    ) ? (
+
+            {(() => {
+              const pageNumbers = [];
+              const maxVisiblePages = 5;
+
+              let startPage = Math.max(
+                1,
+                currentPage - Math.floor(maxVisiblePages / 2)
+              );
+              let endPage = Math.min(
+                totalPages,
+                startPage + maxVisiblePages - 1
+              );
+
+              if (endPage - startPage + 1 < maxVisiblePages) {
+                startPage = Math.max(1, endPage - maxVisiblePages + 1);
+              }
+
+              if (startPage > 1) {
+                pageNumbers.push(
                   <button
-                    key={pageNumber}
-                    onClick={() => paginate(pageNumber)}
-                    className={`mx-1 px-3 py-1 rounded ${
-                      currentPage === pageNumber
+                    key={1}
+                    onClick={() => paginate(1)}
+                    className="mx-1 my-1 px-3 py-1 rounded bg-purple-100 text-purple-600"
+                  >
+                    1
+                  </button>
+                );
+                if (startPage > 2) {
+                  pageNumbers.push(
+                    <span key="ellipsis1" className="mx-1">
+                      ...
+                    </span>
+                  );
+                }
+              }
+
+              for (let i = startPage; i <= endPage; i++) {
+                pageNumbers.push(
+                  <button
+                    key={i}
+                    onClick={() => paginate(i)}
+                    className={`mx-1 my-1 px-3 py-1 rounded ${
+                      currentPage === i
                         ? "bg-purple-600 text-white"
                         : "bg-purple-100 text-purple-600"
                     }`}
                   >
-                    {pageNumber}
+                    {i}
                   </button>
-                ) : null;
+                );
               }
-            )}
+
+              if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                  pageNumbers.push(
+                    <span key="ellipsis2" className="mx-1">
+                      ...
+                    </span>
+                  );
+                }
+                pageNumbers.push(
+                  <button
+                    key={totalPages}
+                    onClick={() => paginate(totalPages)}
+                    className="mx-1 my-1 px-3 py-1 rounded bg-purple-100 text-purple-600"
+                  >
+                    {totalPages}
+                  </button>
+                );
+              }
+
+              return pageNumbers;
+            })()}
+
             <button
               onClick={() => paginate(currentPage + 1)}
-              disabled={
-                currentPage ===
-                Math.ceil(networkStats.totalTransactions / transactionsPerPage)
-              }
-              className="mx-1 px-3 py-1 rounded bg-purple-100 text-purple-600 disabled:opacity-50"
+              disabled={currentPage === totalPages}
+              className="mx-1 my-1 px-3 py-1 rounded bg-purple-100 text-purple-600 disabled:opacity-50"
             >
               Next
             </button>
